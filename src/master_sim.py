@@ -1,9 +1,17 @@
 #!/usr/bin/env python3
 """
 Master Creative Writing Simulation
-Modes: solo | pairwise
-Personas: on/off, single/multiple
-Prompts: single/multiple
+==================================
+Dimensions (all independent):
+  --mode          {solo, pairwise}
+  --persona       {none, single, multiple}
+  --prompts       {single, multiple}
+
+Example combinations:
+  solo  + none     + single   → one writer, no persona, one prompt
+  solo  + multiple + multiple → one writer, new persona each run, new prompt each run
+  pairwise + single + single → same two personas debate the same prompt 25 times
+  pairwise + multiple + single → new random pair each run, all on same prompt
 """
 
 import os
@@ -17,16 +25,6 @@ from datasets import load_dataset
 import torch
 from transformers import AutoTokenizer, AutoModelForCausalLM
 
-# ---------------- Defaults ---------------- #
-DEFAULT_MODEL = "google/gemma-4-31B-it"
-DEFAULT_RESULTS = "./results_master"
-DEFAULT_SEED = 42
-DEFAULT_RUNS = 25
-DEFAULT_MAX_TURNS = 20
-MIN_TURNS_NON_WRITING = 5
-NUDGE_EVERY = 5
-MIN_TURNS_BEFORE_NUDGE = 4
-
 # ---------------- Env ---------------- #
 os.environ["HF_HOME"] = "/SWS/llms/nobackup"
 os.environ["HF_DATASETS_CACHE"] = "/SWS/llms/nobackup/datasets"
@@ -34,8 +32,15 @@ os.environ["TRANSFORMERS_CACHE"] = "/SWS/llms/nobackup/transformers"
 os.environ["HUGGINGFACE_HUB_CACHE"] = "/SWS/llms/nobackup/hub"
 os.environ["CUDA_VISIBLE_DEVICES"] = "1"
 
+# ---------------- Defaults ---------------- #
+DEFAULT_MODEL = "google/gemma-4-31B-it"
+DEFAULT_SEED = 42
+DEFAULT_RUNS = 25
+DEFAULT_MAX_TURNS = 20
+MIN_TURNS_NON_WRITING = 5
+NUDGE_EVERY = 5
+MIN_TURNS_BEFORE_NUDGE = 4
 
-# ---------------- Nudges ---------------- #
 NUDGE_MSGS = {
     "ideation": "Moderator: You've both shared your initial ideas. If you both feel ready, you may move on to discussing them together. Otherwise, continue jotting down thoughts.",
     "discussion": "Moderator: You've been discussing for a while now. If you and your partner have both agreed on a single plot, feel free to move to Outlining. If not, keep debating until you're both satisfied.",
@@ -50,7 +55,6 @@ NEXT_PHASE = {
     "writing": None,
 }
 
-# ---------------- Prompts ---------------- #
 WORLD_TEMPLATE = """You are participating in a remote creative writing exercise with one other person. You have been randomly paired with a teammate, and together you will write a short piece of fiction based on a shared prompt.
 
 ### THE TASK
@@ -104,9 +108,9 @@ DEFAULT_PERSONA = (
 )
 
 
-# ---------------- Dataset Loaders ---------------- #
+# ---------------- Dataset ---------------- #
 def load_prompts(dataset_name: str, num: int, seed: int):
-    print(f"[MAIN] Loading prompts from {dataset_name} ...")
+    print(f"[MAIN] Loading {num} prompt(s) from {dataset_name} ...")
     try:
         ds = load_dataset(dataset_name, split="train")
     except Exception:
@@ -152,7 +156,6 @@ def build_persona_from_row(row) -> str:
     for k, v in row.items():
         if v is not None and str(v).strip():
             lines.append(f"- {k}: {v}")
-
     conflict_lines = [
         "",
         "- BEHAVIORAL RULES:",
@@ -162,7 +165,6 @@ def build_persona_from_row(row) -> str:
         "  * Do NOT agree just to be nice or to end the conversation quickly.",
         "  * You care about the quality of the final story more than harmony.",
     ]
-
     return (
         "You are to strictly follow the following persona and act and answer like it. "
         "Do not sway away from this persona or forget it. Think before doing anything "
@@ -171,19 +173,12 @@ def build_persona_from_row(row) -> str:
     )
 
 
-def sample_personas(ds, n: int, seed: int, single: bool):
+def sample_personas(ds, n: int, seed: int):
     rng = random.Random(seed)
     total = len(ds)
     indices = list(range(total))
     rng.shuffle(indices)
-
-    personas = []
-    for i in range(n):
-        idx = indices[i % total] if single else indices[i]
-        personas.append(build_persona_from_row(ds[idx]))
-
-    print(f"[MAIN] Sampled {n} persona(s) (single={single}, seed={seed})\n")
-    return personas
+    return [build_persona_from_row(ds[i]) for i in indices[:n]]
 
 
 # ---------------- Agent ---------------- #
@@ -235,7 +230,6 @@ class Agent:
 
         new_tokens = outputs[0][inputs.input_ids.shape[1]:]
         text = tokenizer.decode(new_tokens, skip_special_tokens=True).strip()
-
         self.phase_history.append({"role": "assistant", "content": text})
         return text
 
@@ -246,7 +240,7 @@ class Agent:
         self.phase_summaries.append(f"{self.current_phase}: {summary}")
 
 
-# ---------------- Transition Detection ---------------- #
+# ---------------- Transitions ---------------- #
 def explicit_agreement(text: str) -> bool:
     lower = text.lower()
     positive = any(w in lower for w in [
@@ -271,15 +265,15 @@ def explicit_disagreement(text: str) -> bool:
 
 
 # ---------------- Phase Runners ---------------- #
-def get_last_message_by_other(phase_conv: list, current_speaker):
+def get_last_message_by_other(phase_conv, current_speaker):
     for agent_obj, msg in reversed(phase_conv):
         if agent_obj is not current_speaker:
             return msg
     return None
 
 
-def run_pairwise_phase(a: Agent, b: Agent, prompt_text: str, phase: str, log: list):
-    print(f"\n>>> Starting phase: {phase.upper()} (pairwise)")
+def run_pairwise_phase(a, b, prompt_text, phase, log):
+    print(f"\n>>> Phase: {phase.upper()} (pairwise)")
     a.set_phase(phase)
     b.set_phase(phase)
 
@@ -291,7 +285,6 @@ def run_pairwise_phase(a: Agent, b: Agent, prompt_text: str, phase: str, log: li
     transition_asked = False
 
     while turn < DEFAULT_MAX_TURNS:
-        # Moderator nudge / poll
         if phase == "writing":
             if turn >= MIN_TURNS_BEFORE_NUDGE and turn % NUDGE_EVERY == 0:
                 nudge = NUDGE_MSGS.get(phase, "")
@@ -312,7 +305,6 @@ def run_pairwise_phase(a: Agent, b: Agent, prompt_text: str, phase: str, log: li
                 log.append({"phase": phase, "speaker": "Moderator", "message": poll})
                 transition_asked = True
 
-        # Build user_msg
         last_other_msg = get_last_message_by_other(phase_conv, speaker)
 
         if phase == "ideation":
@@ -336,7 +328,7 @@ def run_pairwise_phase(a: Agent, b: Agent, prompt_text: str, phase: str, log: li
         if phase == "writing" and last_other_msg:
             similarity = difflib.SequenceMatcher(None, last_other_msg, response).ratio()
             if similarity > 0.85:
-                print(f">>> Detected repetition (similarity={similarity:.2f}). Forcing transition.")
+                print(f">>> Repetition detected (sim={similarity:.2f}). Forcing transition.")
                 phase_conv.append((speaker, response))
                 log.append({"phase": phase, "speaker": speaker.name, "message": response})
                 break
@@ -376,13 +368,13 @@ def run_pairwise_phase(a: Agent, b: Agent, prompt_text: str, phase: str, log: li
     return draft if (phase == "writing" and draft) else (phase_conv[-1][1] if phase_conv else "")
 
 
-def run_solo_phase(agent: Agent, prompt_text: str, phase: str, log: list):
-    print(f"\n>>> Starting phase: {phase.upper()} (solo)")
+def run_solo_phase(agent, prompt_text, phase, log):
+    print(f"\n>>> Phase: {phase.upper()} (solo)")
     agent.set_phase(phase)
 
     draft = ""
-    turn = 0
     max_turns = 1 if phase != "writing" else DEFAULT_MAX_TURNS
+    turn = 0
 
     while turn < max_turns:
         if phase == "ideation":
@@ -402,7 +394,6 @@ def run_solo_phase(agent: Agent, prompt_text: str, phase: str, log: list):
 
         response = agent.speak(prompt_text, user_msg, max_tokens=800 if phase == "writing" else 400, solo=True)
         turn += 1
-
         log.append({"phase": phase, "speaker": agent.name, "message": response})
         print(f"[{agent.name} @ {phase} turn {turn}] {response.replace(chr(10), ' ')[:200]}...")
 
@@ -414,13 +405,13 @@ def run_solo_phase(agent: Agent, prompt_text: str, phase: str, log: list):
     return draft if (phase == "writing" and draft) else response
 
 
-# ---------------- Full Simulation ---------------- #
-def run_one(prompt: dict, run_idx: int, personas: list, mode: str, results_dir: Path):
+# ---------------- Orchestration ---------------- #
+def run_one(prompt, run_idx, personas, mode, results_dir):
     prompt_text = prompt["text"]
-    run_name = f"{prompt['id']}_{mode}_run{run_idx}"
+    run_name = f"{prompt['id']}_{mode}_p{len(personas)}_run{run_idx}"
 
     print(f"\n{'='*80}")
-    print(f"RUN {run_idx} | {mode.upper()} | {run_name}")
+    print(f"RUN {run_idx} | {mode.upper()} | personas={len(personas)} | {run_name}")
     print(f"{'='*80}")
 
     log = []
@@ -431,7 +422,7 @@ def run_one(prompt: dict, run_idx: int, personas: list, mode: str, results_dir: 
         run_solo_phase(agent, prompt_text, "discussion", log)
         run_solo_phase(agent, prompt_text, "outlining", log)
         final = run_solo_phase(agent, prompt_text, "writing", log)
-        meta = {"persona": personas[0][:200]}
+        meta = {"persona": personas[0][:200] if personas else "default"}
     else:
         a = Agent("PersonA", personas[0])
         b = Agent("PersonB", personas[1])
@@ -439,7 +430,10 @@ def run_one(prompt: dict, run_idx: int, personas: list, mode: str, results_dir: 
         run_pairwise_phase(a, b, prompt_text, "discussion", log)
         run_pairwise_phase(a, b, prompt_text, "outlining", log)
         final = run_pairwise_phase(a, b, prompt_text, "writing", log)
-        meta = {"persona_a": personas[0][:200], "persona_b": personas[1][:200]}
+        meta = {
+            "persona_a": personas[0][:200] if personas else "default",
+            "persona_b": personas[1][:200] if len(personas) > 1 else "default",
+        }
 
     results_dir.mkdir(parents=True, exist_ok=True)
     result = {
@@ -459,30 +453,26 @@ def run_one(prompt: dict, run_idx: int, personas: list, mode: str, results_dir: 
     return result
 
 
-# ---------------- Main ---------------- #
 def main():
     parser = argparse.ArgumentParser(description="Master Creative Writing Simulation")
     parser.add_argument("--mode", choices=["solo", "pairwise"], default="pairwise",
-                        help="Conversation mode: solo writer or pairwise collaboration")
-    parser.add_argument("--persona", dest="use_persona", action="store_true", default=True,
-                        help="Use Nemotron personas (default)")
-    parser.add_argument("--no-persona", dest="use_persona", action="store_false",
-                        help="Disable personas; use default writer persona")
-    parser.add_argument("--single-persona", action="store_true",
-                        help="Reuse the same persona(s) for all runs")
-    parser.add_argument("--num-prompts", type=int, default=1,
-                        help="Number of unique prompts to cycle through")
-    parser.add_argument("--num-runs", type=int, default=25,
-                        help="Total number of simulations")
-    parser.add_argument("--results-dir", default=DEFAULT_RESULTS,
-                        help="Output directory")
-    parser.add_argument("--model-id", default=DEFAULT_MODEL,
-                        help="HuggingFace model ID")
-    parser.add_argument("--seed", type=int, default=DEFAULT_SEED,
-                        help="Random seed for prompts and personas")
-    parser.add_argument("--dataset", default="SAA-Lab/LitBench-Train",
-                        help="Dataset to load prompts from")
+                        help="Conversation structure")
+    parser.add_argument("--persona", choices=["none", "single", "multiple"], default="multiple",
+                        help="none = default writer, single = reuse same persona(s), multiple = new per run")
+    parser.add_argument("--prompts", choices=["single", "multiple"], default="single",
+                        help="single = one prompt for all runs, multiple = different prompt per run")
+    parser.add_argument("--num-runs", type=int, default=DEFAULT_RUNS,
+                        help="Total simulations")
+    parser.add_argument("--results-dir", default=None,
+                        help="Output folder (default: auto-named from config)")
+    parser.add_argument("--model-id", default=DEFAULT_MODEL)
+    parser.add_argument("--seed", type=int, default=DEFAULT_SEED)
+    parser.add_argument("--dataset", default="SAA-Lab/LitBench-Train")
     args = parser.parse_args()
+
+    # Auto-name results dir if not given
+    if args.results_dir is None:
+        args.results_dir = f"./results_{args.mode}_persona-{args.persona}_prompts-{args.prompts}"
 
     global tokenizer, model
     print(f"[MAIN] Loading {args.model_id} ...")
@@ -495,25 +485,29 @@ def main():
     model.eval()
     print("[MAIN] Model loaded.\n")
 
-    prompts = load_prompts(args.dataset, args.num_prompts, args.seed)
+    # Load prompts
+    num_prompts = 1 if args.prompts == "single" else args.num_runs
+    prompts = load_prompts(args.dataset, num_prompts, args.seed)
 
-    personas_needed = 1 if args.mode == "solo" else 2
-    if args.use_persona:
-        persona_ds = load_nemotron_personas()
-        total_personas = args.num_runs if args.single_persona else args.num_runs * personas_needed
-        raw_personas = sample_personas(persona_ds, total_personas, args.seed, args.single_persona)
-        # Chunk into groups
-        persona_groups = []
-        for i in range(args.num_runs):
-            if args.mode == "solo":
-                persona_groups.append([raw_personas[i % len(raw_personas)]])
-            else:
-                if args.single_persona:
-                    persona_groups.append([raw_personas[0], raw_personas[0]])
-                else:
-                    persona_groups.append([raw_personas[i*2], raw_personas[i*2 + 1]])
+    # Build persona groups
+    agents_per_run = 1 if args.mode == "solo" else 2
+    persona_groups = []
+
+    if args.persona == "none":
+        persona_groups = [[DEFAULT_PERSONA] * agents_per_run for _ in range(args.num_runs)]
     else:
-        persona_groups = [[DEFAULT_PERSONA] * personas_needed for _ in range(args.num_runs)]
+        persona_ds = load_nemotron_personas()
+        if args.persona == "single":
+            # Sample once, reuse
+            sampled = sample_personas(persona_ds, agents_per_run, args.seed)
+            persona_groups = [sampled[:] for _ in range(args.num_runs)]
+        else:  # multiple
+            total_needed = args.num_runs * agents_per_run
+            sampled = sample_personas(persona_ds, total_needed, args.seed)
+            persona_groups = [
+                [sampled[i * agents_per_run + j] for j in range(agents_per_run)]
+                for i in range(args.num_runs)
+            ]
 
     results_dir = Path(args.results_dir)
 

@@ -1,24 +1,29 @@
 # Master Creative Writing Simulation
 
-Unified script for running solo or pairwise LLM creative-writing simulations with configurable personas, prompts, and conversation modes.
+Run creative-writing simulations across **three independent dimensions**, giving **12 possible configurations**.
 
-## Quick Start
+## Dimensions
+
+| Flag | Choices | Description |
+|------|---------|-------------|
+| `--mode` | `solo`, `pairwise` | One writer alone, or two agents collaborating |
+| `--persona` | `none`, `single`, `multiple` | `none`=default writer; `single`=same persona(s) every run; `multiple`=fresh persona(s) per run |
+| `--prompts` | `single`, `multiple` | `single`=same prompt for all runs; `multiple`=new prompt per run |
+
+## Quick-start recipes
 
 ```bash
-# Pairwise (default): 2 agents, 25 runs, 1 prompt, multiple personas
-python master_sim.py
+# 1. Pairwise, multiple personas, single prompt (closest to original)
+python master_sim.py --mode pairwise --persona multiple --prompts single
 
-# Solo writer: 1 agent writes alone
-python master_sim.py --mode solo
+# 2. Solo writer, no persona, multiple prompts
+python master_sim.py --mode solo --persona none --prompts multiple
 
-# No personas (default writer only)
-python master_sim.py --no-persona
+# 3. Pairwise, same two personas reused, single prompt
+python master_sim.py --mode pairwise --persona single --prompts single
 
-# Single persona reused for every run
-python master_sim.py --single-persona
+# 4. Solo, new persona each run, one prompt
+python master_sim.py --mode solo --persona multiple --prompts single
 
-# 5 different prompts, 10 total runs
-python master_sim.py --num-prompts 5 --num-runs 10
-
-# Custom model and output folder
-python master_sim.py --model-id meta-llama/Llama-3.1-8B-Instruct --results-dir ./my_runs
+# 5. Full sweep: 25 runs, everything fresh each time
+python master_sim.py --mode pairwise --persona multiple --prompts multiple --num-runs 25
